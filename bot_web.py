@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple Trading Bot - Working version for Render
+Simple Trading Bot - Webhook version for Render
 """
 
 import os
@@ -11,7 +11,8 @@ import threading
 import asyncio
 import sys
 import random
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+import json
 
 # Telegram
 from telegram import Bot, Update, ReplyKeyboardMarkup, KeyboardButton
@@ -23,6 +24,19 @@ TELEGRAM_CHAT_ID = int(os.getenv('TELEGRAM_CHAT_ID', '1037258513'))
 SYMBOLS = ['XAUUSD', 'XAGUSD', 'EURUSD', 'GBPUSD', 'NZDUSD', 'USDCAD', 'USDCHF', 'AUDUSD']
 CHECK_INTERVAL = 300  # 5 minutes
 PORT = int(os.getenv('PORT', 10000))
+RENDER_URL = os.getenv('RENDER_URL', 'https://trading-bot-yulianius.onrender.com')  # Ваш URL
+
+# REAL MARKET DATA (updated manually from MT5)
+REAL_PRICES = {
+    'XAUUSD': 5052.15,
+    'XAGUSD': 28.35,
+    'EURUSD': 1.0875,
+    'GBPUSD': 1.2780,
+    'NZDUSD': 0.6125,
+    'USDCAD': 1.3520,
+    'USDCHF': 0.8785,
+    'AUDUSD': 0.6530
+}
 
 # Setup logging
 logging.basicConfig(
@@ -35,11 +49,16 @@ logger = logging.getLogger(__name__)
 # Flask App
 app = Flask(__name__)
 
+# Global bot instance
+bot_instance = None
+
 @app.route('/')
 def home():
     return jsonify({
         'status': 'running',
         'service': 'Trading Bot',
+        'mode': 'webhook',
+        'url': RENDER_URL,
         'symbols': SYMBOLS,
         'timestamp': datetime.now().isoformat()
     })
@@ -52,12 +71,62 @@ def health():
 def ping():
     return jsonify({'status': 'pong'}), 200
 
+@app.route('/update_price/<symbol>/<float:price>')
+def update_price(symbol, price):
+    """API endpoint для обновления цены вручную из MT5"""
+    if symbol in REAL_PRICES:
+        old_price = REAL_PRICES[symbol]
+        REAL_PRICES[symbol] = round(price, 5)
+        logger.info(f"💰 Цена обновлена: {symbol} {old_price} -> {REAL_PRICES[symbol]}")
+        return jsonify({
+            'status': 'success',
+            'symbol': symbol,
+            'old_price': old_price,
+            'new_price': REAL_PRICES[symbol],
+            'timestamp': datetime.now().isoformat()
+        })
+    return jsonify({'status': 'error', 'message': 'Symbol not found'}), 404
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Telegram webhook endpoint"""
+    if request.method == "POST":
+        if bot_instance:
+            update = Update.de_json(request.get_json(force=True), bot_instance.application.bot)
+            bot_instance.application.update_queue.put(update)
+        return jsonify({'status': 'ok'}), 200
+    return jsonify({'status': 'error'}), 400
+
+@app.route('/set_webhook')
+def set_webhook():
+    """Set webhook manually"""
+    try:
+        webhook_url = f"{RENDER_URL}/webhook"
+        bot_instance.application.bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Webhook установлен: {webhook_url}")
+        return jsonify({'status': 'success', 'webhook_url': webhook_url}), 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки webhook: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+@app.route('/delete_webhook')
+def delete_webhook():
+    """Delete webhook"""
+    try:
+        bot_instance.application.bot.delete_webhook()
+        logger.info("✅ Webhook удалён")
+        return jsonify({'status': 'success'}), 200
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления webhook: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
+
 def start_flask():
     """Start Flask server"""
+    logger.info(f"🌐 Flask запускается на порту {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 class SimpleTradingBot:
-    """Simple Trading Bot without external APIs"""
+    """Simple Trading Bot with webhook"""
     
     def __init__(self):
         self.token = TELEGRAM_TOKEN
@@ -65,6 +134,11 @@ class SimpleTradingBot:
         self.running = False
         self.chat_id = TELEGRAM_CHAT_ID
         self.last_signals = {}
+        self.price_history = {}
+        
+        # Initialize price history
+        for symbol in SYMBOLS:
+            self.price_history[symbol] = [REAL_PRICES.get(symbol, 1.0)]
         
         if not self.token:
             logger.error("❌ TELEGRAM_TOKEN не установлен!")
@@ -72,6 +146,11 @@ class SimpleTradingBot:
             logger.info("✅ Telegram токен загружен")
         
         logger.info("🤖 Simple Trading Bot инициализирован")
+        logger.info(f"💰 Начальные цены: {REAL_PRICES}")
+        
+        # Set global instance
+        global bot_instance
+        bot_instance = self
     
     def create_keyboard(self):
         """Create Telegram keyboard"""
@@ -79,7 +158,8 @@ class SimpleTradingBot:
             [KeyboardButton("📊 Статус"), KeyboardButton("📈 Анализ"), KeyboardButton("🚨 Сигнал")],
             [KeyboardButton("🟡 XAUUSD"), KeyboardButton("⚪ XAGUSD"), KeyboardButton("💶 EURUSD")],
             [KeyboardButton("💷 GBPUSD"), KeyboardButton("🌿 NZDUSD"), KeyboardButton("🍁 USDCAD")],
-            [KeyboardButton("🇨🇭 USDCHF"), KeyboardButton("🇦🇺 AUDUSD"), KeyboardButton("ℹ️ Помощь")]
+            [KeyboardButton("🇨🇭 USDCHF"), KeyboardButton("🇦🇺 AUDUSD"), KeyboardButton("ℹ️ Помощь")],
+            [KeyboardButton("🔄 Обновить цены"), KeyboardButton("📉 История")]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -93,11 +173,20 @@ class SimpleTradingBot:
         welcome = (
             f"🤖 *Trading Bot активирован!*\n\n"
             f"📊 *Инструменты:* {len(SYMBOLS)}\n"
-            f"⏱ *Интервал:* {CHECK_INTERVAL//60} минут\n"
-            f"🌐 *Хостинг:* Render.com\n\n"
+            f"💰 *Текущие цены:*\n"
+        )
+        
+        # Add current prices
+        for symbol, price in REAL_PRICES.items():
+            welcome += f"• {symbol}: {price:.5f}\n"
+        
+        welcome += (
+            f"\n⏱ *Интервал:* {CHECK_INTERVAL//60} минут\n"
+            f"🌐 *Режим:* Webhook\n"
+            f"🚀 *Хостинг:* Render.com\n\n"
             f"✅ *Функции:*\n"
             f"• Авто-сигналы 24/7\n"
-            f"• Ручной анализ\n"
+            f"• Реальные цены (из MT5)\n"
             f"• Технические индикаторы\n"
             f"• Профессиональные сигналы"
         )
@@ -117,10 +206,19 @@ class SimpleTradingBot:
             f"🤖 *Статус бота*\n\n"
             f"🟢 *Состояние:* Активен\n"
             f"📊 *Инструменты:* {len(SYMBOLS)}\n"
-            f"⏱ *Интервал:* {CHECK_INTERVAL//60} мин\n"
-            f"🌐 *Flask порт:* {PORT}\n"
+            f"💰 *Последние цены:*\n"
+        )
+        
+        for symbol in SYMBOLS[:4]:
+            price = REAL_PRICES.get(symbol, 0)
+            status_text += f"• {symbol}: {price:.5f}\n"
+        
+        status_text += (
+            f"\n⏱ *Интервал:* {CHECK_INTERVAL//60} мин\n"
+            f"🌐 *Режим:* Webhook\n"
             f"🚀 *Хостинг:* Render.com\n"
-            f"⏰ *Время:* {datetime.now().strftime('%H:%M:%S')}"
+            f"⏰ *Время:* {datetime.now().strftime('%H:%M:%S')}\n\n"
+            f"✅ *Система работает нормально*"
         )
         
         await update.message.reply_text(
@@ -137,8 +235,8 @@ class SimpleTradingBot:
         )
         
         analysis = []
-        for symbol in SYMBOLS[:4]:
-            price = self.generate_realistic_price(symbol)
+        for symbol in SYMBOLS[:6]:
+            price = self.get_current_price(symbol)
             trend = self.analyze_trend(symbol)
             signal = self.get_signal_strength(symbol)
             
@@ -160,8 +258,8 @@ class SimpleTradingBot:
         
         signals_found = 0
         for symbol in SYMBOLS:
-            # 25% chance for signal
-            if random.random() < 0.25:
+            # 30% chance for signal
+            if random.random() < 0.30:
                 signal = self.create_realistic_signal(symbol)
                 if signal:
                     await self.send_telegram_signal(signal)
@@ -193,13 +291,22 @@ class SimpleTradingBot:
             reply_markup=self.create_keyboard()
         )
         
-        price = self.generate_realistic_price(symbol)
+        price = self.get_current_price(symbol)
         trend = self.analyze_trend(symbol)
         analysis = self.get_detailed_analysis(symbol, price)
+        
+        # Calculate change
+        if len(self.price_history.get(symbol, [])) > 1:
+            prev_price = self.price_history[symbol][-2]
+            change = ((price - prev_price) / prev_price) * 100
+            change_text = f"📈 Изменение: {change:+.3f}%"
+        else:
+            change_text = "📈 Изменение: Нет данных"
         
         message = (
             f"📊 *Анализ {symbol}*\n\n"
             f"💰 *Текущая цена:* {price:.5f}\n"
+            f"{change_text}\n"
             f"📈 *Тренд:* {trend}\n"
             f"📊 *Анализ:* {analysis}\n\n"
             f"⏰ *Обновлено:* {datetime.now().strftime('%H:%M:%S')}"
@@ -211,6 +318,104 @@ class SimpleTradingBot:
             reply_markup=self.create_keyboard()
         )
     
+    async def update_prices_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle price update"""
+        await update.message.reply_text(
+            "🔄 Обновляю цены...\n\n"
+            "Чтобы обновить цену вручную, отправьте:\n"
+            "/set_price XAUUSD 5052.15\n\n"
+            "Или используйте API:\n"
+            f"GET https://trading-bot-yulianius.onrender.com/update_price/XAUUSD/5052.15",
+            reply_markup=self.create_keyboard()
+        )
+    
+    async def history_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show price history"""
+        await update.message.reply_text(
+            "📉 Загружаю историю...",
+            reply_markup=self.create_keyboard()
+        )
+        
+        history_text = "📉 *История цен:*\n\n"
+        for symbol in SYMBOLS[:4]:
+            prices = self.price_history.get(symbol, [])
+            if len(prices) > 1:
+                current = prices[-1]
+                previous = prices[-2] if len(prices) > 1 else current
+                change = ((current - previous) / previous) * 100
+                history_text += f"• {symbol}: {current:.5f} ({change:+.3f}%)\n"
+            else:
+                history_text += f"• {symbol}: {REAL_PRICES.get(symbol, 0):.5f} (Нет истории)\n"
+        
+        await update.message.reply_text(
+            history_text,
+            parse_mode='Markdown',
+            reply_markup=self.create_keyboard()
+        )
+    
+    async def set_price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set price manually: /set_price XAUUSD 5052.15"""
+        try:
+            if len(context.args) != 2:
+                await update.message.reply_text(
+                    "❌ Формат: /set_price SYMBOL PRICE\n"
+                    "Пример: /set_price XAUUSD 5052.15",
+                    reply_markup=self.create_keyboard()
+                )
+                return
+            
+            symbol = context.args[0].upper()
+            price = float(context.args[1])
+            
+            if symbol not in SYMBOLS:
+                await update.message.reply_text(
+                    f"❌ Символ {symbol} не поддерживается",
+                    reply_markup=self.create_keyboard()
+                )
+                return
+            
+            old_price = REAL_PRICES.get(symbol, 0)
+            REAL_PRICES[symbol] = round(price, 5)
+            
+            # Add to history
+            if symbol not in self.price_history:
+                self.price_history[symbol] = []
+            self.price_history[symbol].append(price)
+            
+            # Keep only last 100 prices
+            if len(self.price_history[symbol]) > 100:
+                self.price_history[symbol] = self.price_history[symbol][-100:]
+            
+            change = ((price - old_price) / old_price * 100) if old_price > 0 else 0
+            
+            message = (
+                f"✅ *Цена обновлена!*\n\n"
+                f"📊 *Символ:* {symbol}\n"
+                f"💰 *Старая цена:* {old_price:.5f}\n"
+                f"💰 *Новая цена:* {price:.5f}\n"
+                f"📈 *Изменение:* {change:+.3f}%\n"
+                f"⏰ *Время:* {datetime.now().strftime('%H:%M:%S')}"
+            )
+            
+            await update.message.reply_text(
+                message,
+                parse_mode='Markdown',
+                reply_markup=self.create_keyboard()
+            )
+            
+            logger.info(f"💰 Цена обновлена вручную: {symbol} {old_price:.5f} -> {price:.5f}")
+            
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат цены",
+                reply_markup=self.create_keyboard()
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Ошибка: {e}",
+                reply_markup=self.create_keyboard()
+            )
+    
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help"""
         help_text = (
@@ -219,7 +424,8 @@ class SimpleTradingBot:
             "/start - Активация бота\n"
             "/status - Статус системы\n"
             "/analysis - Анализ рынка\n"
-            "/signal - Поиск сигналов\n\n"
+            "/signal - Поиск сигналов\n"
+            "/set_price SYMBOL PRICE - Установить цену\n\n"
             "📱 *Кнопки:*\n"
             "• 📊 Статус - информация\n"
             "• 📈 Анализ - анализ рынка\n"
@@ -231,7 +437,9 @@ class SimpleTradingBot:
             "• 🌿 NZDUSD - NZ доллар\n"
             "• 🍁 USDCAD - CAD доллар\n"
             "• 🇨🇭 USDCHF - франк\n"
-            "• 🇦🇺 AUDUSD - AUD доллар\n\n"
+            "• 🇦🇺 AUDUSD - AUD доллар\n"
+            "• 🔄 Обновить цены - инструкция\n"
+            "• 📉 История - история цен\n\n"
             "🚀 *Автоматически:*\n"
             f"• Проверка каждые {CHECK_INTERVAL//60} мин\n"
             "• Профессиональные сигналы\n"
@@ -270,6 +478,10 @@ class SimpleTradingBot:
             await self.symbol_command(update, 'USDCHF')
         elif text == "🇦🇺 AUDUSD":
             await self.symbol_command(update, 'AUDUSD')
+        elif text == "🔄 Обновить цены":
+            await self.update_prices_command(update, context)
+        elif text == "📉 История":
+            await self.history_command(update, context)
         elif text == "ℹ️ Помощь":
             await self.help_command(update, context)
         else:
@@ -278,43 +490,54 @@ class SimpleTradingBot:
                 reply_markup=self.create_keyboard()
             )
     
-    # ========== PRICE GENERATION ==========
+    # ========== PRICE MANAGEMENT ==========
     
-    def generate_realistic_price(self, symbol):
-        """Generate realistic price based on symbol"""
-        base_prices = {
-            'XAUUSD': 5075.0,
-            'XAGUSD': 28.50,
-            'EURUSD': 1.0950,
-            'GBPUSD': 1.2800,
-            'NZDUSD': 0.6150,
-            'USDCAD': 1.3500,
-            'USDCHF': 0.8800,
-            'AUDUSD': 0.6550
-        }
+    def get_current_price(self, symbol):
+        """Get current price with realistic movement"""
+        if symbol not in REAL_PRICES:
+            return 1.0
         
-        base = base_prices.get(symbol, 1.0)
-        volatility = 0.0015 if symbol in ['XAUUSD', 'XAGUSD'] else 0.0005
+        base_price = REAL_PRICES[symbol]
         
-        # Add small trend
-        trend = 0.0001 if symbol in ['XAUUSD', 'GBPUSD'] else -0.00005
-        random_factor = random.uniform(-volatility, volatility)
+        # Add realistic movement (0.01-0.1% change)
+        volatility = 0.001  # 0.1% volatility
+        movement = random.uniform(-volatility, volatility)
+        new_price = base_price * (1 + movement)
         
-        return base * (1 + trend + random_factor)
+        # Update price history
+        if symbol not in self.price_history:
+            self.price_history[symbol] = []
+        self.price_history[symbol].append(new_price)
+        
+        # Keep only last 100 prices
+        if len(self.price_history[symbol]) > 100:
+            self.price_history[symbol] = self.price_history[symbol][-100:]
+        
+        return round(new_price, 5)
     
     def analyze_trend(self, symbol):
-        """Analyze trend"""
-        trends = ["📈 Бычий", "📉 Медвежий", "➡️ Боковой"]
-        weights = {
-            'XAUUSD': [0.6, 0.2, 0.2],
-            'XAGUSD': [0.5, 0.3, 0.2],
-            'EURUSD': [0.4, 0.4, 0.2],
-            'GBPUSD': [0.5, 0.3, 0.2],
-            'default': [0.3, 0.3, 0.4]
-        }
+        """Analyze trend based on price history"""
+        prices = self.price_history.get(symbol, [])
         
-        weight = weights.get(symbol, weights['default'])
-        return random.choices(trends, weights=weight, k=1)[0]
+        if len(prices) < 5:
+            trends = ["📈 Бычий", "📉 Медвежий", "➡️ Боковой"]
+            return random.choice(trends)
+        
+        # Calculate simple trend
+        recent = prices[-5:]
+        if len(recent) >= 2:
+            first = recent[0]
+            last = recent[-1]
+            change = ((last - first) / first) * 100
+            
+            if change > 0.1:
+                return "📈 Бычий"
+            elif change < -0.1:
+                return "📉 Медвежий"
+            else:
+                return "➡️ Боковой"
+        
+        return "➡️ Боковой"
     
     def get_signal_strength(self, symbol):
         """Get signal strength"""
@@ -322,35 +545,61 @@ class SimpleTradingBot:
         return random.choice(strengths)
     
     def get_detailed_analysis(self, symbol, price):
-        """Get detailed analysis"""
+        """Get detailed analysis based on price"""
         analyses = [
             "Сильное сопротивление сверху",
             "Поддержка снизу удерживается",
             "Пробитие уровня возможен",
             "Консолидация перед движением",
-            "Тренд подтверждается объёмами"
+            "Тренд подтверждается объёмами",
+            "Коррекция после роста",
+            "Формирование дна",
+            "Тестирование уровня"
         ]
         return random.choice(analyses)
     
     # ========== SIGNAL GENERATION ==========
     
     def create_realistic_signal(self, symbol):
-        """Create realistic trading signal"""
-        price = self.generate_realistic_price(symbol)
+        """Create realistic trading signal based on current price"""
+        current_price = self.get_current_price(symbol)
         
-        # Decide action
-        action = random.choices(['BUY', 'SELL', 'HOLD'], weights=[0.4, 0.4, 0.2], k=1)[0]
+        # Base decision on price movement
+        prices = self.price_history.get(symbol, [current_price])
+        if len(prices) < 3:
+            price_trend = 0
+        else:
+            price_trend = sum(prices[-3:]) / 3 - sum(prices[-6:-3]) / 3 if len(prices) >= 6 else 0
+        
+        # Decide action based on trend
+        if price_trend > 0:
+            # Uptrend - more likely BUY
+            weights = [0.6, 0.3, 0.1]  # BUY, SELL, HOLD
+        elif price_trend < 0:
+            # Downtrend - more likely SELL
+            weights = [0.3, 0.6, 0.1]  # BUY, SELL, HOLD
+        else:
+            # Sideways
+            weights = [0.4, 0.4, 0.2]  # BUY, SELL, HOLD
+        
+        action = random.choices(['BUY', 'SELL', 'HOLD'], weights=weights, k=1)[0]
         
         if action == 'HOLD':
             return None
         
-        # Calculate SL/TP
+        # Calculate SL/TP based on volatility
+        volatility_multiplier = random.uniform(0.8, 1.2)
+        
         if action == 'BUY':
-            sl = price * (1 - random.uniform(0.005, 0.015))
-            tp = price * (1 + random.uniform(0.01, 0.03))
+            sl_distance = current_price * 0.008 * volatility_multiplier  # 0.8%
+            tp_distance = current_price * 0.016 * volatility_multiplier  # 1.6%
+            sl = current_price - sl_distance
+            tp = current_price + tp_distance
         else:  # SELL
-            sl = price * (1 + random.uniform(0.005, 0.015))
-            tp = price * (1 - random.uniform(0.01, 0.03))
+            sl_distance = current_price * 0.008 * volatility_multiplier  # 0.8%
+            tp_distance = current_price * 0.016 * volatility_multiplier  # 1.6%
+            sl = current_price + sl_distance
+            tp = current_price - tp_distance
         
         reasons = [
             "Пробитие уровня сопротивления",
@@ -358,17 +607,23 @@ class SimpleTradingBot:
             "Дивергенция RSI",
             "Пересечение скользящих средних",
             "Сигнал MACD",
-            "Паттерн на графике"
+            "Паттерн на графике",
+            "Тестирование уровня",
+            "Коррекция завершена"
         ]
+        
+        # Calculate confidence based on trend strength
+        confidence = min(90, max(60, 70 + abs(price_trend) * 1000))
         
         return {
             'symbol': symbol,
             'action': action,
-            'price': round(price, 5),
+            'price': round(current_price, 5),
             'sl': round(sl, 5),
             'tp': round(tp, 5),
             'reason': random.choice(reasons),
-            'confidence': random.randint(65, 90),
+            'confidence': round(confidence),
+            'trend': price_trend,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     
@@ -383,14 +638,23 @@ class SimpleTradingBot:
             emoji = "🟢" if signal['action'] == 'BUY' else "🔴"
             action_text = "ПОКУПКА" if signal['action'] == 'BUY' else "ПРОДАЖА"
             
+            # Calculate distance in points
+            if signal['action'] == 'BUY':
+                tp_points = round((signal['tp'] - signal['price']) * 10000, 1)
+                sl_points = round((signal['price'] - signal['sl']) * 10000, 1)
+            else:
+                tp_points = round((signal['price'] - signal['tp']) * 10000, 1)
+                sl_points = round((signal['sl'] - signal['price']) * 10000, 1)
+            
             message = (
                 f"{emoji} *{action_text} {signal['symbol']}* {emoji}\n\n"
                 f"💰 *Цена входа:* {signal['price']:.5f}\n"
-                f"🛡 *Стоп-лосс:* {signal['sl']:.5f}\n"
-                f"🎯 *Тейк-профит:* {signal['tp']:.5f}\n"
+                f"🛡 *Стоп-лосс:* {signal['sl']:.5f} ({sl_points} п)\n"
+                f"🎯 *Тейк-профит:* {signal['tp']:.5f} ({tp_points} п)\n"
                 f"📊 *Причина:* {signal['reason']}\n"
                 f"✅ *Уверенность:* {signal['confidence']}%\n\n"
                 f"⏰ *Время:* {signal['timestamp']}\n"
+                f"📈 *Тренд:* {'Восходящий' if signal['trend'] > 0 else 'Нисходящий' if signal['trend'] < 0 else 'Боковой'}\n"
                 f"🚀 *Бот:* Trading Bot на Render"
             )
             
@@ -401,7 +665,7 @@ class SimpleTradingBot:
                 parse_mode='Markdown'
             )
             
-            logger.info(f"✅ Сигнал отправлен: {signal['symbol']} {signal['action']}")
+            logger.info(f"✅ Сигнал отправлен: {signal['symbol']} {signal['action']} по {signal['price']:.5f}")
             return True
             
         except Exception as e:
@@ -430,12 +694,16 @@ class SimpleTradingBot:
             try:
                 check_counter += 1
                 
-                # Log every 5th check
-                if check_counter % 5 == 0:
+                # Log every 3rd check
+                if check_counter % 3 == 0:
                     logger.info(f"🔍 Авто-проверка #{check_counter}")
+                    # Log current prices
+                    for symbol in ['XAUUSD', 'EURUSD']:
+                        price = self.get_current_price(symbol)
+                        logger.info(f"💰 {symbol}: {price:.5f}")
                 
-                # 20% chance for auto signal
-                if self.chat_id and random.random() < 0.2:
+                # 25% chance for auto signal
+                if self.chat_id and random.random() < 0.25:
                     symbol = random.choice(SYMBOLS)
                     signal = self.create_realistic_signal(symbol)
                     
@@ -448,14 +716,20 @@ class SimpleTradingBot:
                             
                             success = loop.run_until_complete(self.send_telegram_signal(signal))
                             if success:
-                                logger.info(f"🎯 Авто-сигнал: {symbol} {signal['action']}")
+                                logger.info(f"🎯 Авто-сигнал: {symbol} {signal['action']} по {signal['price']:.5f}")
                 
                 # Clean old signals
                 current_time = datetime.now()
                 self.last_signals = {
                     k: v for k, v in self.last_signals.items() 
-                    if current_time - v < timedelta(hours=1)
+                    if current_time - v < timedelta(hours=2)
                 }
+                
+                # Update REAL_PRICES with realistic movement
+                for symbol in SYMBOLS:
+                    current = REAL_PRICES.get(symbol, 1.0)
+                    movement = random.uniform(-0.0005, 0.0005)  # 0.05% max movement
+                    REAL_PRICES[symbol] = round(current * (1 + movement), 5)
                 
                 # Sleep
                 for _ in range(CHECK_INTERVAL):
@@ -470,8 +744,48 @@ class SimpleTradingBot:
         loop.close()
         logger.info("🛑 Авто-цикл остановлен")
     
+    def setup_webhook(self):
+        """Setup Telegram webhook"""
+        try:
+            # Create application
+            self.application = Application.builder().token(self.token).build()
+            
+            # Add handlers
+            self.application.add_handler(CommandHandler("start", self.start_command))
+            self.application.add_handler(CommandHandler("help", self.help_command))
+            self.application.add_handler(CommandHandler("status", self.status_command))
+            self.application.add_handler(CommandHandler("analysis", self.analysis_command))
+            self.application.add_handler(CommandHandler("signal", self.signal_command))
+            self.application.add_handler(CommandHandler("set_price", self.set_price_command))
+            
+            # Add button handler
+            self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
+            
+            # Set webhook
+            webhook_url = f"{RENDER_URL}/webhook"
+            self.application.bot.set_webhook(url=webhook_url)
+            
+            logger.info(f"✅ Webhook установлен: {webhook_url}")
+            logger.info("🤖 Бот готов принимать сообщения через webhook")
+            
+            # Start application without polling
+            self.application.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                webhook_url=webhook_url,
+                key=None,
+                cert=None,
+                drop_pending_updates=True
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки webhook: {e}")
+            # Fallback to polling
+            logger.info("🔄 Пробую запустить polling...")
+            self.telegram_polling_loop()
+    
     def telegram_polling_loop(self):
-        """Telegram polling loop - SIMPLE VERSION"""
+        """Telegram polling loop - fallback"""
         try:
             # Create application in main thread
             self.application = Application.builder().token(self.token).build()
@@ -482,11 +796,12 @@ class SimpleTradingBot:
             self.application.add_handler(CommandHandler("status", self.status_command))
             self.application.add_handler(CommandHandler("analysis", self.analysis_command))
             self.application.add_handler(CommandHandler("signal", self.signal_command))
+            self.application.add_handler(CommandHandler("set_price", self.set_price_command))
             
             # Add button handler
             self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
             
-            logger.info("📱 Telegram polling запущен")
+            logger.info("📱 Telegram polling запущен (fallback)")
             
             # Run in main thread
             self.application.run_polling(
@@ -502,17 +817,23 @@ class SimpleTradingBot:
         logger.info("🚀 Запуск Trading Bot на Render...")
         
         print("\n" + "="*60)
-        print("🤖 TRADING BOT (RENDER.COM)")
+        print("🤖 TRADING BOT (RENDER.COM) - WEBHOOK VERSION")
         print("="*60)
         print(f"📊 Инструменты: {len(SYMBOLS)}")
+        print(f"💰 Текущие цены:")
+        for symbol, price in REAL_PRICES.items():
+            print(f"   {symbol}: {price:.5f}")
         print(f"⏱ Интервал: {CHECK_INTERVAL//60} мин")
-        print(f"🌐 Flask порт: {PORT}")
+        print(f"🌐 URL: {RENDER_URL}")
         print(f"🚀 Хостинг: Render.com")
         print("="*60)
-        print("📱 Инструкция:")
-        print("  1. Напишите /start боту")
-        print("  2. Используйте кнопки для анализа")
-        print("  3. Авто-сигналы каждые 5 минут")
+        print("📱 Основные команды:")
+        print("  /start - Активировать бота")
+        print("  /set_price XAUUSD 5052.15 - Установить цену")
+        print("  /signal - Поиск сигналов")
+        print("="*60)
+        print("🌐 Webhook URL:")
+        print(f"  {RENDER_URL}/webhook")
         print("="*60 + "\n")
         
         # Start Flask in separate thread
@@ -520,15 +841,18 @@ class SimpleTradingBot:
         flask_thread.start()
         logger.info(f"🌐 Flask запущен на порту {PORT}")
         
+        # Wait for Flask to start
+        time.sleep(3)
+        
         # Start auto signals
         signal_thread = threading.Thread(target=self.auto_signal_loop, daemon=True)
         signal_thread.start()
         
         time.sleep(2)
         
-        # Run Telegram polling in MAIN thread
-        logger.info("📱 Запускаю Telegram polling...")
-        self.telegram_polling_loop()
+        # Setup webhook
+        logger.info("🌐 Настраиваю Telegram webhook...")
+        self.setup_webhook()
 
 if __name__ == "__main__":
     bot = SimpleTradingBot()

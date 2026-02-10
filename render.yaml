@@ -16,3 +16,5 @@ services:
         value: "1037258513"
       - key: PORT
         value: "10000"
+      - key: RENDER_URL
+        value: "https://trading-bot-yulianius.onrender.com"

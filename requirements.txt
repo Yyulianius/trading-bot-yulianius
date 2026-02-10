@@ -1,5 +1,22 @@
-python-telegram-bot[job-queue]==20.7
+# Основные
+python-telegram-bot==20.8
 Flask==3.0.3
 python-dotenv==1.0.0
 gunicorn==21.2.0
 apscheduler==3.10.4
+
+# Анализ данных
+pandas==1.5.3
+numpy==1.24.3
+talib-binary==0.4.28  # TA-Lib для индикаторов
+
+# MetaTrader 5
+MetaTrader5==5.0.43
+
+# Графики
+matplotlib==3.7.2
+mplfinance==0.12.10b0  # Специально для свечных графиков
+
+# Утилиты
+Pillow==10.2.0  # Для работы с изображениями
+requests==2.31.0

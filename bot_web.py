@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-REAL Trading Bot with MT5 Alpari - Version WITHOUT TA-Lib
+REAL Trading Bot with Yahoo Finance - Version WITHOUT MT5
 """
 
 import os
@@ -12,6 +12,7 @@ import asyncio
 import sys
 import io
 import warnings
+import yfinance as yf
 warnings.filterwarnings('ignore')
 
 # Flask
@@ -24,7 +25,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 # Data Analysis
 import pandas as pd
 import numpy as np
-import MetaTrader5 as mt5
 
 # Charts
 import matplotlib
@@ -35,18 +35,20 @@ from PIL import Image
 # Configuration
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
 TELEGRAM_CHAT_ID = int(os.getenv('TELEGRAM_CHAT_ID', '1037258513'))
-MT5_LOGIN = int(os.getenv('MT5_LOGIN', '52754246'))
-MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
-MT5_SERVER = os.getenv('MT5_SERVER', 'Alpari-MT5-Demo')
 
-SYMBOLS = ['XAUUSD', 'XAGUSD', 'EURUSD', 'GBPUSD', 'NZDUSD', 'USDCAD', 'USDCHF', 'AUDUSD']
-TIMEFRAMES = {
-    'M15': mt5.TIMEFRAME_M15,
-    'H1': mt5.TIMEFRAME_H1,
-    'H4': mt5.TIMEFRAME_H4,
-    'D1': mt5.TIMEFRAME_D1
+# Символы для Yahoo Finance (другие тикеры)
+SYMBOLS_MAP = {
+    'XAUUSD': 'GC=F',      # Gold Futures
+    'XAGUSD': 'SI=F',      # Silver Futures  
+    'EURUSD': 'EURUSD=X',  # EUR/USD
+    'GBPUSD': 'GBPUSD=X',  # GBP/USD
+    'NZDUSD': 'NZDUSD=X',  # NZD/USD
+    'USDCAD': 'CAD=X',     # USD/CAD
+    'USDCHF': 'CHF=X',     # USD/CHF
+    'AUDUSD': 'AUDUSD=X'   # AUD/USD
 }
 
+SYMBOLS = list(SYMBOLS_MAP.keys())
 CHECK_INTERVAL = 60  # 1 minute
 PORT = int(os.getenv('PORT', 10000))
 
@@ -65,59 +67,64 @@ app = Flask(__name__)
 def home():
     return jsonify({
         'status': 'running',
-        'service': 'MT5 Trading Bot Pro',
-        'broker': 'Alpari-MT5-Demo',
+        'service': 'Trading Bot Pro (Yahoo Finance)',
+        'data_source': 'Yahoo Finance',
         'symbols': SYMBOLS,
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'mt5_connected': mt5_connected()}), 200
-
-def mt5_connected():
-    """Check MT5 connection"""
-    try:
-        return mt5.initialize(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
-    except:
-        return False
+    return jsonify({'status': 'healthy'}), 200
 
 def start_flask():
     """Start Flask server"""
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-class MT5DataFetcher:
-    """MT5 Data Fetcher"""
+class YahooDataFetcher:
+    """Yahoo Finance Data Fetcher"""
     
     @staticmethod
-    def fetch_data(symbol, timeframe='H1', bars=100):
-        """Fetch real data from MT5"""
+    def fetch_data(symbol, interval='1h', period='5d'):
+        """Fetch real data from Yahoo Finance"""
         try:
-            if not mt5.initialize(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
-                logger.error(f"MT5 initialize failed for {symbol}")
+            yahoo_symbol = SYMBOLS_MAP.get(symbol)
+            if not yahoo_symbol:
+                logger.error(f"No Yahoo symbol for {symbol}")
                 return None
             
-            tf = TIMEFRAMES.get(timeframe, mt5.TIMEFRAME_H1)
-            rates = mt5.copy_rates_from_pos(symbol, tf, 0, bars)
-            mt5.shutdown()
+            # Download data
+            ticker = yf.Ticker(yahoo_symbol)
             
-            if rates is None or len(rates) == 0:
-                logger.warning(f"No data for {symbol}")
+            # Map interval
+            interval_map = {
+                '1h': '1h',
+                'H1': '1h',
+                'H4': '4h',
+                '4h': '4h',
+                'D1': '1d',
+                '1d': '1d'
+            }
+            
+            yf_interval = interval_map.get(interval, '1h')
+            yf_period = '5d' if yf_interval in ['1h', '4h'] else '1mo'
+            
+            df = ticker.history(interval=yf_interval, period=yf_period)
+            
+            if df.empty:
+                logger.warning(f"No data for {symbol} ({yahoo_symbol})")
                 return None
             
-            df = pd.DataFrame(rates)
-            df['time'] = pd.to_datetime(df['time'], unit='s')
-            df.set_index('time', inplace=True)
-            
-            # Rename columns to standard names
+            # Rename columns to match our format
             df.rename(columns={
-                'open': 'Open',
-                'high': 'High',
-                'low': 'Low',
-                'close': 'Close',
-                'tick_volume': 'Volume'
+                'Open': 'Open',
+                'High': 'High',
+                'Low': 'Low',
+                'Close': 'Close',
+                'Volume': 'Volume'
             }, inplace=True)
             
+            logger.info(f"✅ Данные загружены: {symbol} ({yahoo_symbol}) - {len(df)} баров")
             return df[['Open', 'High', 'Low', 'Close', 'Volume']]
             
         except Exception as e:
@@ -126,36 +133,37 @@ class MT5DataFetcher:
     
     @staticmethod
     def get_current_price(symbol):
-        """Get current bid/ask price"""
+        """Get current price"""
         try:
-            if not mt5.initialize(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
+            yahoo_symbol = SYMBOLS_MAP.get(symbol)
+            if not yahoo_symbol:
                 return None
             
-            tick = mt5.symbol_info_tick(symbol)
-            mt5.shutdown()
+            ticker = yf.Ticker(yahoo_symbol)
+            hist = ticker.history(period='1d', interval='1m')
             
-            if tick:
+            if not hist.empty:
                 return {
-                    'bid': tick.bid,
-                    'ask': tick.ask,
-                    'spread': tick.ask - tick.bid
+                    'price': hist['Close'].iloc[-1],
+                    'timestamp': datetime.now().strftime('%H:%M:%S')
                 }
             return None
         except:
             return None
 
 class TechnicalAnalyzer:
-    """Professional Technical Analysis WITHOUT TA-Lib"""
+    """Professional Technical Analysis"""
     
     @staticmethod
     def analyze_symbol(symbol):
         """Complete analysis for a symbol"""
         try:
             # Fetch data for different timeframes
-            h1_data = MT5DataFetcher.fetch_data(symbol, 'H1', 100)
-            h4_data = MT5DataFetcher.fetch_data(symbol, 'H4', 50)
+            h1_data = YahooDataFetcher.fetch_data(symbol, '1h', '5d')
+            h4_data = YahooDataFetcher.fetch_data(symbol, '4h', '10d')
             
-            if h1_data is None or h4_data is None:
+            if h1_data is None or h4_data is None or h1_data.empty or h4_data.empty:
+                logger.warning(f"Недостаточно данных для {symbol}")
                 return None
             
             # Calculate all indicators
@@ -182,7 +190,7 @@ class TechnicalAnalyzer:
             atr_value = TechnicalAnalyzer.calculate_atr(h1_data)
             signals.append(f"ATR: {atr_value:.4f}")
             
-            # 4. Candlestick Patterns (без TA-Lib)
+            # 4. Candlestick Patterns
             patterns = TechnicalAnalyzer.detect_patterns_simple(h1_data)
             if patterns:
                 signals.append(f"Паттерны: {', '.join(patterns)}")
@@ -212,13 +220,13 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_trend(data):
-        """Determine trend direction WITHOUT TA-Lib"""
+        """Determine trend direction"""
         if data.empty or len(data) < 20:
             return "Недостаточно данных"
         
         close = data['Close']
         
-        # Calculate EMAs manually
+        # Calculate EMAs
         ema_20 = close.ewm(span=20, adjust=False).mean()
         ema_50 = close.ewm(span=50, adjust=False).mean()
         
@@ -240,7 +248,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_rsi(data, period=14):
-        """RSI analysis WITHOUT TA-Lib"""
+        """RSI analysis"""
         if len(data) < period + 1:
             return None
         
@@ -275,7 +283,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_macd(data):
-        """MACD analysis WITHOUT TA-Lib"""
+        """MACD analysis"""
         if len(data) < 35:
             return None
         
@@ -301,7 +309,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_bollinger(data, period=20):
-        """Bollinger Bands analysis WITHOUT TA-Lib"""
+        """Bollinger Bands analysis"""
         if len(data) < period:
             return None
         
@@ -327,7 +335,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_atr(data, period=14):
-        """Calculate Average True Range WITHOUT TA-Lib"""
+        """Calculate Average True Range"""
         if len(data) < period:
             return 0
         
@@ -347,7 +355,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def detect_patterns_simple(data):
-        """Detect simple candlestick patterns WITHOUT TA-Lib"""
+        """Detect simple candlestick patterns"""
         if len(data) < 3:
             return []
         
@@ -555,11 +563,11 @@ class TechnicalAnalyzer:
         return signal
 
 class ChartGenerator:
-    """Generate trading charts WITHOUT mplfinance"""
+    """Generate trading charts"""
     
     @staticmethod
-    def create_candlestick_chart(data, symbol, signal=None, sr_levels=None):
-        """Create professional candlestick chart WITHOUT mplfinance"""
+    def create_price_chart(data, symbol, signal=None, sr_levels=None):
+        """Create price chart"""
         try:
             if data.empty or len(data) < 10:
                 return None
@@ -568,60 +576,47 @@ class ChartGenerator:
             plot_data = data.tail(30).copy()
             
             # Create figure
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), 
-                                          gridspec_kw={'height_ratios': [3, 1]})
+            fig, ax = plt.subplots(figsize=(12, 6))
             
-            # Plot candlesticks manually
-            for i, (idx, row) in enumerate(plot_data.iterrows()):
-                color = 'green' if row['Close'] >= row['Open'] else 'red'
-                
-                # Plot candle body
-                ax1.bar(i, abs(row['Close'] - row['Open']), 
-                       bottom=min(row['Open'], row['Close']),
-                       width=0.6, color=color, edgecolor=color)
-                
-                # Plot wicks
-                ax1.vlines(i, row['Low'], row['High'], 
-                          color=color, linewidth=0.8)
+            # Plot price line
+            ax.plot(plot_data.index, plot_data['Close'], 
+                   linewidth=2, color='blue', label='Цена закрытия')
+            
+            # Plot moving averages
+            ax.plot(plot_data.index, plot_data['Close'].rolling(20).mean(),
+                   linewidth=1, color='orange', linestyle='--', label='SMA(20)')
             
             # Add title
-            ax1.set_title(f'{symbol} - H1 | MT5 Alpari', fontsize=14, fontweight='bold')
-            ax1.set_ylabel('Цена')
-            ax1.grid(True, alpha=0.3)
-            
-            # Plot volume
-            ax2.bar(range(len(plot_data)), plot_data['Volume'], color='blue', alpha=0.5)
-            ax2.set_xlabel('Свечи (последние 30)')
-            ax2.set_ylabel('Объём')
-            ax2.grid(True, alpha=0.3)
+            ax.set_title(f'{symbol} | Yahoo Finance', fontsize=14, fontweight='bold')
+            ax.set_ylabel('Цена')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
             
             # Add signal markers if provided
             if signal and signal['action'] != 'HOLD':
                 color = 'green' if signal['action'] == 'BUY' else 'red'
-                ax1.axhline(y=signal['price'], color=color, linestyle='--', 
-                           linewidth=2, alpha=0.7, label=f"Вход: {signal['price']:.5f}")
+                ax.axhline(y=signal['price'], color=color, linestyle='--', 
+                          linewidth=2, alpha=0.7, label=f"Вход: {signal['price']:.5f}")
                 
                 if signal['sl'] > 0:
-                    ax1.axhline(y=signal['sl'], color='red', linestyle=':', 
-                               linewidth=1.5, alpha=0.5, label=f"SL: {signal['sl']:.5f}")
+                    ax.axhline(y=signal['sl'], color='red', linestyle=':', 
+                              linewidth=1.5, alpha=0.5, label=f"SL: {signal['sl']:.5f}")
                 
                 if signal['tp'] > 0:
-                    ax1.axhline(y=signal['tp'], color='green', linestyle=':', 
-                               linewidth=1.5, alpha=0.5, label=f"TP: {signal['tp']:.5f}")
-                
-                ax1.legend()
+                    ax.axhline(y=signal['tp'], color='green', linestyle=':', 
+                              linewidth=1.5, alpha=0.5, label=f"TP: {signal['tp']:.5f}")
             
             # Add support/resistance lines
             if sr_levels:
                 for support in sr_levels.get('support', []):
                     if support:
-                        ax1.axhline(y=support, color='blue', linestyle='--', 
-                                   linewidth=1, alpha=0.3)
+                        ax.axhline(y=support, color='blue', linestyle='--', 
+                                  linewidth=1, alpha=0.3, label='Поддержка')
                 
                 for resistance in sr_levels.get('resistance', []):
                     if resistance:
-                        ax1.axhline(y=resistance, color='orange', linestyle='--', 
-                                   linewidth=1, alpha=0.3)
+                        ax.axhline(y=resistance, color='orange', linestyle='--', 
+                                  linewidth=1, alpha=0.3, label='Сопротивление')
             
             plt.tight_layout()
             
@@ -637,7 +632,7 @@ class ChartGenerator:
             logger.error(f"Chart creation error: {e}")
             return None
 
-class RealTradingBot:
+class TradingBot:
     """Main Trading Bot Class"""
     
     def __init__(self):
@@ -647,13 +642,7 @@ class RealTradingBot:
         self.chat_id = TELEGRAM_CHAT_ID
         self.last_signals = {}
         
-        # Test MT5 connection
-        if mt5_connected():
-            logger.info("✅ MT5 подключен успешно!")
-        else:
-            logger.warning("⚠️ MT5 не подключен. Проверьте логин/пароль.")
-        
-        logger.info("🤖 Real Trading Bot PRO инициализирован (без TA-Lib)")
+        logger.info("🤖 Trading Bot PRO инициализирован (Yahoo Finance)")
     
     def create_keyboard(self):
         """Create Telegram keyboard"""
@@ -672,19 +661,15 @@ class RealTradingBot:
         self.chat_id = update.effective_chat.id
         logger.info(f"📱 Бот активирован в чате: {self.chat_id}")
         
-        # Test MT5 connection
-        mt5_status = "✅ ПОДКЛЮЧЕН" if mt5_connected() else "❌ НЕ ПОДКЛЮЧЕН"
-        
         welcome = (
-            f"🤖 *Real Trading Bot PRO*\n\n"
-            f"📊 *Брокер:* MT5 Alpari-Demo\n"
-            f"🔗 *Статус MT5:* {mt5_status}\n"
+            f"🤖 *Trading Bot PRO*\n\n"
+            f"📊 *Источник данных:* Yahoo Finance\n"
             f"📈 *Инструменты:* {len(SYMBOLS)} валютных пар\n"
             f"⏱ *Частота проверки:* {CHECK_INTERVAL} сек\n"
             f"🌐 *Хостинг:* Render.com\n\n"
-            f"✅ *Реальные функции:*\n"
-            f"• Живые котировки MT5\n"
-            f"• Технический анализ (без TA-Lib)\n"
+            f"✅ *Функции:*\n"
+            f"• Реальные котировки Yahoo Finance\n"
+            f"• Технический анализ (RSI, MACD, BB)\n"
             f"• Графики с точками входа\n"
             f"• Паттерны и уровни S/R\n"
             f"• Авто-сигналы 24/7"
@@ -701,31 +686,22 @@ class RealTradingBot:
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status"""
-        mt5_status = "🟢 ONLINE" if mt5_connected() else "🔴 OFFLINE"
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Get server time from MT5 if connected
-        if mt5_connected():
-            try:
-                mt5.initialize(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
-                server_time = mt5.symbol_info_tick('EURUSD').time
-                mt5.shutdown()
-                server_time_str = datetime.fromtimestamp(server_time).strftime('%H:%M:%S')
-            except:
-                server_time_str = "Нет данных"
-        else:
-            server_time_str = "Нет подключения"
+        # Test data fetch
+        test_data = YahooDataFetcher.fetch_data('XAUUSD', '1h', '1d')
+        data_status = "✅ Данные доступны" if test_data is not None and not test_data.empty else "⚠️ Проверьте подключение"
         
         status_text = (
             f"🤖 *Статус системы*\n\n"
             f"🟢 *Бот:* Активен\n"
-            f"📡 *MT5:* {mt5_status}\n"
-            f"🕒 *Время сервера:* {server_time_str}\n"
-            f"📊 *Инструменты:* {len(SYMBOLS)}\n"
-            f"📈 *Анализ:* Manual (без TA-Lib)\n"
+            f"📡 *Источник:* Yahoo Finance\n"
+            f"📊 *Данные:* {data_status}\n"
+            f"📈 *Инструменты:* {len(SYMBOLS)}\n"
+            f"📊 *Анализ:* RSI, MACD, Bollinger Bands\n"
             f"⏱ *Интервал:* {CHECK_INTERVAL} сек\n"
             f"🌐 *Flask порт:* {PORT}\n"
-            f"⏰ *Локальное время:* {current_time}"
+            f"⏰ *Время:* {current_time}"
         )
         
         await update.message.reply_text(
@@ -736,13 +712,6 @@ class RealTradingBot:
     
     async def analysis_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /analysis"""
-        if not mt5_connected():
-            await update.message.reply_text(
-                "❌ MT5 не подключен. Проверьте логин/пароль.",
-                reply_markup=self.create_keyboard()
-            )
-            return
-        
         await update.message.reply_text(
             "📈 Анализирую все инструменты...",
             reply_markup=self.create_keyboard()
@@ -777,15 +746,8 @@ class RealTradingBot:
     
     async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /signal"""
-        if not mt5_connected():
-            await update.message.reply_text(
-                "❌ MT5 не подключен. Проверьте логин/пароль.",
-                reply_markup=self.create_keyboard()
-            )
-            return
-        
         await update.message.reply_text(
-            "🔍 Ищу реальные торговые сигналы...",
+            "🔍 Ищу торговые сигналы...",
             reply_markup=self.create_keyboard()
         )
         
@@ -807,7 +769,7 @@ class RealTradingBot:
         
         if signals_found > 0:
             await update.message.reply_text(
-                f"✅ Найдено {signals_found} реальных сигналов",
+                f"✅ Найдено {signals_found} сигналов",
                 reply_markup=self.create_keyboard()
             )
         else:
@@ -821,13 +783,6 @@ class RealTradingBot:
         if symbol not in SYMBOLS:
             await update.message.reply_text(
                 f"❌ Символ {symbol} не поддерживается",
-                reply_markup=self.create_keyboard()
-            )
-            return
-        
-        if not mt5_connected():
-            await update.message.reply_text(
-                "❌ MT5 не подключен",
                 reply_markup=self.create_keyboard()
             )
             return
@@ -849,14 +804,14 @@ class RealTradingBot:
                 )
                 
                 # Send chart
-                chart = ChartGenerator.create_candlestick_chart(
+                chart = ChartGenerator.create_price_chart(
                     analysis['data'], symbol,
                     analysis['trading_signal'],
                     analysis['support_resistance']
                 )
                 
                 if chart:
-                    caption = f"📊 {symbol} - H1 | MT5 Alpari"
+                    caption = f"📊 {symbol} | Yahoo Finance"
                     await update.message.reply_photo(
                         photo=chart,
                         caption=caption
@@ -900,11 +855,12 @@ class RealTradingBot:
             summary += f"• Причины: {', '.join(signal['reason'][:3])}\n"
         
         summary += f"\n⏰ *Время анализа:* {analysis['timestamp']}"
+        summary += f"\n📡 *Источник:* Yahoo Finance"
         
         return summary
     
     async def send_real_signal_with_chart(self, analysis):
-        """Send real trading signal with chart"""
+        """Send trading signal with chart"""
         try:
             if not self.chat_id:
                 return False
@@ -916,14 +872,15 @@ class RealTradingBot:
                 return False
             
             # Generate chart
-            chart = ChartGenerator.create_candlestick_chart(
+            chart = ChartGenerator.create_price_chart(
                 analysis['data'], symbol,
                 signal,
                 analysis['support_resistance']
             )
             
             if not chart:
-                return False
+                # Send text only if chart fails
+                return await self.send_text_signal(analysis)
             
             # Prepare signal message
             emoji = "🟢" if signal['action'] == 'BUY' else "🔴"
@@ -944,8 +901,8 @@ class RealTradingBot:
                 message += f"{i}. {reason}\n"
             
             message += f"\n⏰ *Время:* {analysis['timestamp']}\n"
-            message += f"📡 *Источник:* MT5 Alpari-Demo\n"
-            message += f"🚀 *Бот:* Real Trading Bot PRO (без TA-Lib)"
+            message += f"📡 *Источник:* Yahoo Finance\n"
+            message += f"🚀 *Бот:* Trading Bot PRO"
             
             # Send to Telegram
             bot = Bot(token=self.token)
@@ -958,38 +915,65 @@ class RealTradingBot:
                 parse_mode='Markdown'
             )
             
-            logger.info(f"✅ Реальный сигнал отправлен: {symbol} {signal['action']} ({signal['confidence']}%)")
+            logger.info(f"✅ Сигнал отправлен: {symbol} {signal['action']} ({signal['confidence']}%)")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки реального сигнала: {e}")
+            logger.error(f"❌ Ошибка отправки сигнала с графиком: {e}")
+            return await self.send_text_signal(analysis)
+    
+    async def send_text_signal(self, analysis):
+        """Send text-only signal"""
+        try:
+            if not self.chat_id:
+                return False
+            
+            symbol = analysis['symbol']
+            signal = analysis['trading_signal']
+            
+            emoji = "🟢" if signal['action'] == 'BUY' else "🔴"
+            action_text = "ПОКУПКА" if signal['action'] == 'BUY' else "ПРОДАЖА"
+            
+            message = (
+                f"{emoji} *{action_text} {symbol}* {emoji}\n\n"
+                f"💰 *Цена входа:* {signal['price']:.5f}\n"
+                f"🛡 *Стоп-лосс:* {signal['sl']:.5f}\n"
+                f"🎯 *Тейк-профит:* {signal['tp']:.5f}\n"
+                f"✅ *Уверенность:* {signal['confidence']}%\n"
+                f"📊 *Причины:* {', '.join(signal['reason'][:3])}\n\n"
+                f"⏰ *Время:* {analysis['timestamp']}\n"
+                f"📡 *Источник:* Yahoo Finance"
+            )
+            
+            bot = Bot(token=self.token)
+            await bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='Markdown'
+            )
+            
+            logger.info(f"✅ Текстовый сигнал отправлен: {symbol}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки текстового сигнала: {e}")
             return False
     
     async def send_test_signal(self, update):
         """Send test signal on start"""
         try:
             # Get XAUUSD data
-            data = MT5DataFetcher.fetch_data('XAUUSD', 'H1', 20)
+            data = YahooDataFetcher.fetch_data('XAUUSD', '1h', '1d')
             if data is not None and not data.empty:
                 current_price = data['Close'].iloc[-1]
                 
-                test_signal = {
-                    'symbol': 'XAUUSD',
-                    'action': 'BUY' if current_price > data['Close'].mean() else 'SELL',
-                    'price': round(current_price, 5),
-                    'sl': round(current_price * 0.995, 5),
-                    'tp': round(current_price * 1.01, 5),
-                    'confidence': 85,
-                    'reason': ['Тестовый сигнал', 'Проверка связи MT5'],
-                    'risk_level': 'LOW'
-                }
-                
                 message = (
                     "🟡 *ТЕСТОВЫЙ СИГНАЛ*\n\n"
-                    f"💰 *XAUUSD:* {current_price:.2f}\n"
-                    f"📡 *MT5 статус:* {'✅ ПОДКЛЮЧЕН' if mt5_connected() else '❌ ОШИБКА'}\n"
+                    f"💰 *XAUUSD (Gold):* {current_price:.2f}\n"
+                    f"📡 *Источник:* Yahoo Finance\n"
                     f"🌐 *Бот:* Работает на Render.com\n\n"
-                    f"✅ *Система готова к реальным сигналам!*"
+                    f"✅ *Система готова к реальным сигналам!*\n"
+                    f"Используйте кнопку '🚨 Сигнал' для поиска"
                 )
                 
                 await update.message.reply_text(
@@ -1033,10 +1017,10 @@ class RealTradingBot:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help"""
         help_text = (
-            "🤖 *Real Trading Bot PRO - Команды*\n\n"
+            "🤖 *Trading Bot PRO - Команды*\n\n"
             "📋 *Основные команды:*\n"
-            "/start - Активация и проверка MT5\n"
-            "/status - Статус системы и MT5\n"
+            "/start - Активация бота\n"
+            "/status - Статус системы\n"
             "/analysis - Анализ всех инструментов\n"
             "/signal - Поиск торговых сигналов\n\n"
             "📱 *Кнопки быстрого анализа:*\n"
@@ -1052,11 +1036,11 @@ class RealTradingBot:
             "• Тренд H1/H4 (EMA)\n"
             "• RSI, MACD, Bollinger Bands\n"
             "• Уровни поддержки/сопротивления\n"
-            "• Простые свечные паттерны\n"
+            "• Свечные паттерны\n"
             "• ATR для стоп-лоссов\n\n"
             "🚀 *Автоматически:*\n"
             f"• Проверка каждые {CHECK_INTERVAL} сек\n"
-            "• Реальные сигналы при уверенности >60%\n"
+            "• Сигналы при уверенности >60%\n"
             "• Графики с точками входа"
         )
         
@@ -1071,7 +1055,7 @@ class RealTradingBot:
     def auto_analysis_loop(self):
         """Automatic real-time analysis loop"""
         self.running = True
-        logger.info("🚀 Авто-цикл реального анализа запущен")
+        logger.info("🚀 Авто-цикл анализа запущен")
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1085,12 +1069,6 @@ class RealTradingBot:
                 # Log every 10th check
                 if check_counter % 10 == 0:
                     logger.info(f"🔍 Авто-проверка #{check_counter}")
-                
-                # Check MT5 connection
-                if not mt5_connected():
-                    logger.warning("⚠️ MT5 отключен, пропускаем проверку")
-                    time.sleep(30)
-                    continue
                 
                 # Analyze each symbol
                 signals_sent = 0
@@ -1175,21 +1153,19 @@ class RealTradingBot:
     
     def run(self):
         """Main bot run method"""
-        logger.info("🚀 Запуск Real Trading Bot PRO на Render...")
+        logger.info("🚀 Запуск Trading Bot PRO на Render...")
         
         print("\n" + "="*70)
-        print("🤖 REAL TRADING BOT PRO (MT5 ALPARI)")
+        print("🤖 TRADING BOT PRO (YAHOO FINANCE)")
         print("="*70)
-        print(f"📊 Брокер: Alpari-MT5-Demo")
+        print(f"📊 Источник: Yahoo Finance")
         print(f"📈 Инструменты: {len(SYMBOLS)}")
         print(f"⏱ Интервал: {CHECK_INTERVAL} сек")
-        print(f"📡 MT5 Login: {MT5_LOGIN}")
         print(f"🌐 Flask порт: {PORT}")
         print(f"🚀 Хостинг: Render.com")
-        print(f"📊 Анализ: БЕЗ TA-Lib (ручной расчёт)")
         print("="*70)
         print("📱 Инструкция:")
-        print("  1. Напишите /start для проверки MT5")
+        print("  1. Напишите /start для активации")
         print("  2. Используйте кнопки для анализа")
         print("  3. Авто-сигналы при уверенности >70%")
         print("  4. Графики с точками входа")
@@ -1210,8 +1186,8 @@ class RealTradingBot:
         analysis_thread = threading.Thread(target=self.auto_analysis_loop, daemon=True)
         analysis_thread.start()
         
-        logger.info("✅ Real Trading Bot PRO успешно запущен!")
-        logger.info("📡 Ожидание реальных сигналов с MT5...")
+        logger.info("✅ Trading Bot PRO успешно запущен!")
+        logger.info("📡 Ожидание сигналов с Yahoo Finance...")
         
         # Main loop
         try:
@@ -1230,5 +1206,5 @@ class RealTradingBot:
             sys.exit(0)
 
 if __name__ == "__main__":
-    bot = RealTradingBot()
+    bot = TradingBot()
     bot.run()

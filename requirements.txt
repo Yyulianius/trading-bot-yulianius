@@ -5,7 +5,7 @@ gunicorn==21.2.0
 apscheduler==3.10.4
 pandas==1.5.3
 numpy==1.24.3
-MetaTrader5==5.0.43
 matplotlib==3.7.2
 Pillow==10.2.0
 requests==2.31.0
+yfinance==0.2.38  # Альтернатива MT5 для данных

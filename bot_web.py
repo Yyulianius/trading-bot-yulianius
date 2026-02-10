@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-REAL Trading Bot with MT5 Alpari - Professional Version
+REAL Trading Bot with MT5 Alpari - Version WITHOUT TA-Lib
 """
 
 import os
@@ -24,14 +24,12 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 # Data Analysis
 import pandas as pd
 import numpy as np
-import talib
 import MetaTrader5 as mt5
 
 # Charts
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import mplfinance as mpf
 from PIL import Image
 
 # Configuration
@@ -147,7 +145,7 @@ class MT5DataFetcher:
             return None
 
 class TechnicalAnalyzer:
-    """Professional Technical Analysis"""
+    """Professional Technical Analysis WITHOUT TA-Lib"""
     
     @staticmethod
     def analyze_symbol(symbol):
@@ -184,8 +182,8 @@ class TechnicalAnalyzer:
             atr_value = TechnicalAnalyzer.calculate_atr(h1_data)
             signals.append(f"ATR: {atr_value:.4f}")
             
-            # 4. Candlestick Patterns
-            patterns = TechnicalAnalyzer.detect_patterns(h1_data)
+            # 4. Candlestick Patterns (без TA-Lib)
+            patterns = TechnicalAnalyzer.detect_patterns_simple(h1_data)
             if patterns:
                 signals.append(f"Паттерны: {', '.join(patterns)}")
             
@@ -214,18 +212,15 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_trend(data):
-        """Determine trend direction"""
+        """Determine trend direction WITHOUT TA-Lib"""
         if data.empty or len(data) < 20:
             return "Недостаточно данных"
         
         close = data['Close']
         
-        # Calculate EMAs
-        ema_20 = talib.EMA(close, timeperiod=20)
-        ema_50 = talib.EMA(close, timeperiod=50)
-        
-        if pd.isna(ema_20.iloc[-1]) or pd.isna(ema_50.iloc[-1]):
-            return "Нет данных EMA"
+        # Calculate EMAs manually
+        ema_20 = close.ewm(span=20, adjust=False).mean()
+        ema_50 = close.ewm(span=50, adjust=False).mean()
         
         current_price = close.iloc[-1]
         ema20_val = ema_20.iloc[-1]
@@ -245,12 +240,22 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_rsi(data, period=14):
-        """RSI analysis"""
+        """RSI analysis WITHOUT TA-Lib"""
         if len(data) < period + 1:
             return None
         
         close = data['Close']
-        rsi = talib.RSI(close, timeperiod=period)
+        
+        # Manual RSI calculation
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        # Avoid division by zero
+        loss = loss.replace(0, 0.000001)
+        
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
         
         if pd.isna(rsi.iloc[-1]):
             return None
@@ -270,19 +275,22 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_macd(data):
-        """MACD analysis"""
+        """MACD analysis WITHOUT TA-Lib"""
         if len(data) < 35:
             return None
         
         close = data['Close']
-        macd, signal, hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
         
-        if pd.isna(macd.iloc[-1]) or pd.isna(signal.iloc[-1]):
-            return None
+        # Manual MACD calculation
+        ema_12 = close.ewm(span=12, adjust=False).mean()
+        ema_26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema_12 - ema_26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        histogram = macd_line - signal_line
         
-        macd_val = macd.iloc[-1]
-        signal_val = signal.iloc[-1]
-        hist_val = hist.iloc[-1]
+        macd_val = macd_line.iloc[-1]
+        signal_val = signal_line.iloc[-1]
+        hist_val = histogram.iloc[-1]
         
         if macd_val > signal_val and hist_val > 0:
             return "БЫЧИЙ"
@@ -293,30 +301,33 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def analyze_bollinger(data, period=20):
-        """Bollinger Bands analysis"""
+        """Bollinger Bands analysis WITHOUT TA-Lib"""
         if len(data) < period:
             return None
         
         close = data['Close']
-        upper, middle, lower = talib.BBANDS(close, timeperiod=period)
         
-        if pd.isna(upper.iloc[-1]) or pd.isna(lower.iloc[-1]):
-            return None
+        # Manual Bollinger Bands
+        sma = close.rolling(window=period).mean()
+        std = close.rolling(window=period).std()
+        
+        upper_band = sma + (std * 2)
+        lower_band = sma - (std * 2)
         
         current_price = close.iloc[-1]
-        upper_band = upper.iloc[-1]
-        lower_band = lower.iloc[-1]
+        upper_val = upper_band.iloc[-1]
+        lower_val = lower_band.iloc[-1]
         
-        if current_price >= upper_band:
+        if current_price >= upper_val:
             return "ВЕРХНЯЯ ГРАНИЦА"
-        elif current_price <= lower_band:
+        elif current_price <= lower_val:
             return "НИЖНЯЯ ГРАНИЦА"
         else:
             return "ВНУТРИ КАНАЛА"
     
     @staticmethod
     def calculate_atr(data, period=14):
-        """Calculate Average True Range"""
+        """Calculate Average True Range WITHOUT TA-Lib"""
         if len(data) < period:
             return 0
         
@@ -324,61 +335,86 @@ class TechnicalAnalyzer:
         low = data['Low']
         close = data['Close']
         
-        atr = talib.ATR(high, low, close, timeperiod=period)
+        # Calculate True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        
         return atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else 0
     
     @staticmethod
-    def detect_patterns(data):
-        """Detect candlestick patterns"""
+    def detect_patterns_simple(data):
+        """Detect simple candlestick patterns WITHOUT TA-Lib"""
         if len(data) < 3:
             return []
         
         patterns = []
         
-        # Get OHLC data
-        open_prices = data['Open'].values
-        high_prices = data['High'].values
-        low_prices = data['Low'].values
-        close_prices = data['Close'].values
-        
-        # Check for common patterns (using last 3 candles)
         try:
-            # Hammer
-            hammer = talib.CDLHAMMER(open_prices, high_prices, low_prices, close_prices)
-            if hammer[-1] > 0:
+            # Get last 3 candles
+            last_3 = data.tail(3)
+            
+            # Check for patterns
+            opens = last_3['Open'].values
+            closes = last_3['Close'].values
+            highs = last_3['High'].values
+            lows = last_3['Low'].values
+            
+            # Hammer pattern
+            if TechnicalAnalyzer.is_hammer(opens[-1], closes[-1], highs[-1], lows[-1]):
                 patterns.append("Молот")
             
-            # Engulfing
-            engulfing = talib.CDLENGULFING(open_prices, high_prices, low_prices, close_prices)
-            if engulfing[-1] > 0:
-                patterns.append("Бычье поглощение")
-            elif engulfing[-1] < 0:
-                patterns.append("Медвежье поглощение")
+            # Engulfing pattern
+            if len(opens) >= 2:
+                if TechnicalAnalyzer.is_bullish_engulfing(opens[-2], closes[-2], opens[-1], closes[-1]):
+                    patterns.append("Бычье поглощение")
+                elif TechnicalAnalyzer.is_bearish_engulfing(opens[-2], closes[-2], opens[-1], closes[-1]):
+                    patterns.append("Медвежье поглощение")
             
-            # Doji
-            doji = talib.CDLDOJI(open_prices, high_prices, low_prices, close_prices)
-            if doji[-1] > 0:
+            # Doji pattern
+            if TechnicalAnalyzer.is_doji(opens[-1], closes[-1], highs[-1], lows[-1]):
                 patterns.append("Доджи")
-            
-            # Morning Star
-            morning_star = talib.CDLMORNINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            if morning_star[-1] > 0:
-                patterns.append("Утренняя звезда")
-            
-            # Evening Star
-            evening_star = talib.CDLEVENINGSTAR(open_prices, high_prices, low_prices, close_prices)
-            if evening_star[-1] < 0:
-                patterns.append("Вечерняя звезда")
-            
-            # Hanging Man
-            hanging_man = talib.CDLHANGINGMAN(open_prices, high_prices, low_prices, close_prices)
-            if hanging_man[-1] < 0:
-                patterns.append("Повешенный")
                 
         except Exception as e:
             logger.error(f"Pattern detection error: {e}")
         
         return patterns
+    
+    @staticmethod
+    def is_hammer(open_price, close, high, low):
+        """Check for hammer pattern"""
+        body = abs(close - open_price)
+        lower_shadow = min(open_price, close) - low
+        upper_shadow = high - max(open_price, close)
+        
+        return (lower_shadow > body * 2 and upper_shadow < body * 0.1)
+    
+    @staticmethod
+    def is_bullish_engulfing(open1, close1, open2, close2):
+        """Check for bullish engulfing"""
+        return (close1 < open1 and  # First candle is bearish
+                close2 > open2 and  # Second candle is bullish
+                open2 < close1 and  # Open below previous close
+                close2 > open1)     # Close above previous open
+    
+    @staticmethod
+    def is_bearish_engulfing(open1, close1, open2, close2):
+        """Check for bearish engulfing"""
+        return (close1 > open1 and  # First candle is bullish
+                close2 < open2 and  # Second candle is bearish
+                open2 > close1 and  # Open above previous close
+                close2 < open1)     # Close below previous open
+    
+    @staticmethod
+    def is_doji(open_price, close, high, low):
+        """Check for doji pattern"""
+        body = abs(close - open_price)
+        total_range = high - low
+        
+        return (body <= total_range * 0.1)  # Small body relative to range
     
     @staticmethod
     def find_support_resistance(data, window=20):
@@ -462,8 +498,8 @@ class TechnicalAnalyzer:
             reasons.append("Верхняя граница BB")
         
         # 5. Candlestick patterns (15 points)
-        bullish_patterns = ["Молот", "Бычье поглощение", "Утренняя звезда"]
-        bearish_patterns = ["Медвежье поглощение", "Вечерняя звезда", "Повешенный"]
+        bullish_patterns = ["Молот", "Бычье поглощение"]
+        bearish_patterns = ["Медвежье поглощение", "Доджи"]
         
         for pattern in patterns:
             if pattern in bullish_patterns:
@@ -519,28 +555,45 @@ class TechnicalAnalyzer:
         return signal
 
 class ChartGenerator:
-    """Generate trading charts"""
+    """Generate trading charts WITHOUT mplfinance"""
     
     @staticmethod
     def create_candlestick_chart(data, symbol, signal=None, sr_levels=None):
-        """Create professional candlestick chart"""
+        """Create professional candlestick chart WITHOUT mplfinance"""
         try:
             if data.empty or len(data) < 10:
                 return None
             
-            # Prepare data for mplfinance
-            plot_data = data.tail(50).copy()  # Last 50 candles
+            # Use last 30 candles
+            plot_data = data.tail(30).copy()
             
-            # Create figure with subplots
-            fig = plt.figure(figsize=(12, 8))
-            ax1 = plt.subplot2grid((6, 1), (0, 0), rowspan=4, colspan=1)
-            ax2 = plt.subplot2grid((6, 1), (4, 0), rowspan=2, colspan=1, sharex=ax1)
+            # Create figure
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), 
+                                          gridspec_kw={'height_ratios': [3, 1]})
             
-            # Plot candlesticks
-            mpf.plot(plot_data, type='candle', style='charles', ax=ax1, volume=ax2)
+            # Plot candlesticks manually
+            for i, (idx, row) in enumerate(plot_data.iterrows()):
+                color = 'green' if row['Close'] >= row['Open'] else 'red'
+                
+                # Plot candle body
+                ax1.bar(i, abs(row['Close'] - row['Open']), 
+                       bottom=min(row['Open'], row['Close']),
+                       width=0.6, color=color, edgecolor=color)
+                
+                # Plot wicks
+                ax1.vlines(i, row['Low'], row['High'], 
+                          color=color, linewidth=0.8)
             
             # Add title
             ax1.set_title(f'{symbol} - H1 | MT5 Alpari', fontsize=14, fontweight='bold')
+            ax1.set_ylabel('Цена')
+            ax1.grid(True, alpha=0.3)
+            
+            # Plot volume
+            ax2.bar(range(len(plot_data)), plot_data['Volume'], color='blue', alpha=0.5)
+            ax2.set_xlabel('Свечи (последние 30)')
+            ax2.set_ylabel('Объём')
+            ax2.grid(True, alpha=0.3)
             
             # Add signal markers if provided
             if signal and signal['action'] != 'HOLD':
@@ -600,7 +653,7 @@ class RealTradingBot:
         else:
             logger.warning("⚠️ MT5 не подключен. Проверьте логин/пароль.")
         
-        logger.info("🤖 Real Trading Bot PRO инициализирован")
+        logger.info("🤖 Real Trading Bot PRO инициализирован (без TA-Lib)")
     
     def create_keyboard(self):
         """Create Telegram keyboard"""
@@ -631,7 +684,7 @@ class RealTradingBot:
             f"🌐 *Хостинг:* Render.com\n\n"
             f"✅ *Реальные функции:*\n"
             f"• Живые котировки MT5\n"
-            f"• Технический анализ TA-Lib\n"
+            f"• Технический анализ (без TA-Lib)\n"
             f"• Графики с точками входа\n"
             f"• Паттерны и уровни S/R\n"
             f"• Авто-сигналы 24/7"
@@ -669,7 +722,7 @@ class RealTradingBot:
             f"📡 *MT5:* {mt5_status}\n"
             f"🕒 *Время сервера:* {server_time_str}\n"
             f"📊 *Инструменты:* {len(SYMBOLS)}\n"
-            f"📈 *Анализ:* TA-Lib PRO\n"
+            f"📈 *Анализ:* Manual (без TA-Lib)\n"
             f"⏱ *Интервал:* {CHECK_INTERVAL} сек\n"
             f"🌐 *Flask порт:* {PORT}\n"
             f"⏰ *Локальное время:* {current_time}"
@@ -892,7 +945,7 @@ class RealTradingBot:
             
             message += f"\n⏰ *Время:* {analysis['timestamp']}\n"
             message += f"📡 *Источник:* MT5 Alpari-Demo\n"
-            message += f"🚀 *Бот:* Real Trading Bot PRO"
+            message += f"🚀 *Бот:* Real Trading Bot PRO (без TA-Lib)"
             
             # Send to Telegram
             bot = Bot(token=self.token)
@@ -996,10 +1049,10 @@ class RealTradingBot:
             "• 🇨🇭 USDCHF - швейцарский франк\n"
             "• 🇦🇺 AUDUSD - австралийский доллар\n\n"
             "📊 *Анализ включает:*\n"
-            "• Тренд H1/H4\n"
+            "• Тренд H1/H4 (EMA)\n"
             "• RSI, MACD, Bollinger Bands\n"
             "• Уровни поддержки/сопротивления\n"
-            "• Паттерны свечей\n"
+            "• Простые свечные паттерны\n"
             "• ATR для стоп-лоссов\n\n"
             "🚀 *Автоматически:*\n"
             f"• Проверка каждые {CHECK_INTERVAL} сек\n"
@@ -1133,6 +1186,7 @@ class RealTradingBot:
         print(f"📡 MT5 Login: {MT5_LOGIN}")
         print(f"🌐 Flask порт: {PORT}")
         print(f"🚀 Хостинг: Render.com")
+        print(f"📊 Анализ: БЕЗ TA-Lib (ручной расчёт)")
         print("="*70)
         print("📱 Инструкция:")
         print("  1. Напишите /start для проверки MT5")

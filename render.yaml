@@ -2,12 +2,40 @@ services:
   - type: web
     name: trading-bot
     env: python
+    region: oregon  # Опционально: выбираем регион
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python trade_signal_bot.py
+    branch: main  # Опционально: указываем ветку
+    
+    # Настройки сборки
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    
+    # Команда запуска
+    startCommand: python bot_web.py
+    
+    # Настройки деплоя
     autoDeploy: true
+    pullRequestPreviewsEnabled: false
+    
+    # Health check для Render
+    healthCheckPath: /health
+    healthCheckTimeout: 30
+    healthCheckInitialDelay: 10
+    
+    # Переменные окружения
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: PORT
+        value: "10000"
       - key: TELEGRAM_TOKEN
-        sync: false  # Будем устанавливать вручную в настройках Render
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        value: "1037258513"
+      - key: CHECK_INTERVAL
+        value: "300"  # 5 минут
+      - key: USE_DEMO_DATA
+        value: "true"
+      - key: TEST_MODE
+        value: "true"

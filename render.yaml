@@ -26,7 +26,7 @@ services:
     # Переменные окружения
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.11
       - key: PORT
         value: "10000"
       - key: TELEGRAM_TOKEN

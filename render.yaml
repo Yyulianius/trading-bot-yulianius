@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: trading-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python trade_signal_bot.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TELEGRAM_TOKEN
+        sync: false  # Будем устанавливать вручную в настройках Render

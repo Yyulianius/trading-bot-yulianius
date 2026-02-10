@@ -1,2 +1,17 @@
-# trading-bot-yulianius
-Telegram trading bot with technical analysis
+# Telegram Trading Bot
+
+Торговый бот для Telegram с техническим анализом.
+
+## Функции
+- Технический анализ рынка
+- Автоматические сигналы
+- Уведомления в Telegram
+
+## Установка
+1. Клонировать репозиторий
+2. Установить зависимости: `pip install -r requirements.txt`
+3. Настроить переменные окружения
+4. Запустить: `python bot_web.py`
+
+## Развертывание на Render
+Подключите этот репозиторий к Render.com как Web Service.

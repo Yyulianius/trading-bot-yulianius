@@ -1,58 +1,20 @@
 #!/usr/bin/env python3
 """
-UniversalTradingBot - Версия для деплоя на Render.com с поддержкой Web Service
+UniversalTradingBot - Упрощённая версия для Render без проблемных зависимостей
 """
 
 import os
 import time
 import logging
+import random
 from datetime import datetime
-import talib
-import numpy as np
-import pandas as pd
+from flask import Flask, jsonify
 from telegram import Bot, Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 import threading
 import asyncio
 import sys
-import random
-import hashlib
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import io
-
-# Для работы как Web Service
-from flask import Flask, jsonify
-from apscheduler.schedulers.background import BackgroundScheduler
-
-# Импорт конфигурации
-try:
-    from config import *
-except ImportError:
-    # Значения по умолчанию для Render
-    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
-    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '0')
-    USE_MT5 = False
-    USE_DEMO_DATA = True
-    TEST_MODE = True
-    SYMBOLS = ['XAUUSD', 'EURUSD', 'GBPUSD']
-    CHECK_INTERVAL = 300  # 5 минут
-    TIMEFRAME_H4 = '4h'
-    TIMEFRAME_H1 = '1h'
-    EMA_PERIOD = 20
-    RSI_PERIOD = 7
-    CCI_PERIOD = 14
-    ATR_PERIOD = 14
-    RSI_OVERSOLD = 30
-    RSI_OVERBOUGHT = 70
-    CCI_OVERSOLD = -100
-    CCI_OVERBOUGHT = 100
-    ATR_MIN = 50
-    ATR_MAX = 200
-    STOP_LOSS_ATR_MULTIPLIER = 1.5
-    TAKE_PROFIT_ATR_MULTIPLIER = 2.5
-    RISK_REWARD_RATIO = 2.0
+import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -64,141 +26,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask приложение для health checks
-app = Flask(__name__)
-scheduler = BackgroundScheduler()
+# Конфигурация
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '1037258513')
+SYMBOLS = ['XAUUSD', 'EURUSD', 'GBPUSD']
+CHECK_INTERVAL = 300  # 5 минут
+PORT = int(os.getenv('PORT', 10000))
 
-# Глобальные переменные для статуса
-bot_instance = None
-flask_port = int(os.getenv('PORT', 10000))
+# Flask приложение
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    """Основной endpoint для проверки работы сервиса"""
-    bot_status = "running" if bot_instance and bot_instance.running else "stopped"
     return jsonify({
         'status': 'running',
         'service': 'UniversalTradingBot',
-        'version': '2.0.1',
-        'bot_status': bot_status,
-        'timestamp': datetime.now().isoformat(),
-        'endpoints': {
-            'health': '/health',
-            'status': '/status',
-            'ping': '/ping',
-            'metrics': '/metrics'
-        }
+        'version': '2.0.1-simple',
+        'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/health')
 def health():
-    """Health check endpoint для Render"""
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'flask_port': flask_port,
-        'python_version': sys.version.split()[0]
+        'python': sys.version.split()[0]
     }), 200
-
-@app.route('/status')
-def status():
-    """Статус бота через HTTP"""
-    if bot_instance:
-        return jsonify({
-            'bot_running': bot_instance.running,
-            'telegram_connected': bot_instance.chat_id is not None,
-            'check_interval': CHECK_INTERVAL,
-            'symbols': SYMBOLS,
-            'flask_active': True,
-            'timestamp': datetime.now().isoformat()
-        })
-    return jsonify({
-        'bot_running': False,
-        'message': 'Bot instance not initialized',
-        'timestamp': datetime.now().isoformat()
-    })
 
 @app.route('/ping')
 def ping():
-    """Ping endpoint для поддержания активности"""
-    return jsonify({
-        'status': 'pong',
-        'timestamp': datetime.now().isoformat()
-    }), 200
-
-@app.route('/metrics')
-def metrics():
-    """Метрики системы"""
-    import psutil
-    return jsonify({
-        'cpu_percent': psutil.cpu_percent(),
-        'memory_percent': psutil.virtual_memory().percent,
-        'disk_usage': psutil.disk_usage('/').percent,
-        'timestamp': datetime.now().isoformat()
-    })
-
-def keep_alive_ping():
-    """Функция для самопинга (вызывается по расписанию)"""
-    try:
-        if bot_instance and bot_instance.chat_id:
-            # Отправляем статус в лог каждые 10 минут
-            logger.info(f"✅ Сервис активен. Проверки продолжаются...")
-    except Exception as e:
-        logger.warning(f"Ошибка в keep_alive_ping: {e}")
-
-def start_scheduler():
-    """Запуск планировщика для самопинга"""
-    try:
-        # Самопинг каждые 5 минут для поддержания активности
-        scheduler.add_job(keep_alive_ping, 'interval', minutes=5)
-        scheduler.start()
-        logger.info("⏰ Планировщик запущен (самопинг каждые 5 минут)")
-    except Exception as e:
-        logger.error(f"❌ Ошибка запуска планировщика: {e}")
+    return jsonify({'status': 'pong'}), 200
 
 def start_flask():
-    """Запуск Flask сервера с обработкой ошибок"""
-    try:
-        logger.info(f"🌐 Flask сервер запускается на порту {flask_port}...")
-        # Отключаем логгирование Flask, чтобы не засорять логи
-        import logging as flask_logging
-        flask_log = flask_logging.getLogger('werkzeug')
-        flask_log.setLevel(flask_logging.WARNING)
-        
-        app.run(
-            host='0.0.0.0',
-            port=flask_port,
-            debug=False,
-            use_reloader=False,
-            threaded=True
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка запуска Flask: {e}")
+    """Запуск Flask сервера"""
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 class UniversalTradingBot:
     def __init__(self):
         self.token = TELEGRAM_TOKEN
         self.application = None
         self.running = False
-        self.chat_id = TELEGRAM_CHAT_ID
+        self.chat_id = int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
         
-        # Загружаем chat_id из переменной окружения
-        env_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        if env_chat_id and env_chat_id.isdigit():
-            self.chat_id = int(env_chat_id)
-            logger.info(f"Загружен chat_id из переменной окружения: {self.chat_id}")
-        
-        # Проверяем токен
         if not self.token:
             logger.error("❌ TELEGRAM_TOKEN не установлен!")
-            logger.info("Установите переменную окружения TELEGRAM_TOKEN на Render")
         else:
             logger.info("✅ Telegram токен загружен")
         
-        logger.info("🤖 Бот инициализирован для работы на Render")
+        logger.info("🤖 Бот инициализирован (упрощённая версия)")
     
     def create_main_keyboard(self):
-        """Создает ПОСТОЯННУЮ клавиатуру внизу экрана"""
+        """Создаёт клавиатуру"""
         keyboard = [
             [KeyboardButton("📊 Статус"), KeyboardButton("🧪 Тест"), KeyboardButton("🚨 Сигнал")],
             [KeyboardButton("🟡 XAUUSD"), KeyboardButton("💶 EURUSD"), KeyboardButton("💷 GBPUSD")],
@@ -207,11 +85,8 @@ class UniversalTradingBot:
         return ReplyKeyboardMarkup(
             keyboard,
             resize_keyboard=True,
-            is_persistent=True,
-            input_field_placeholder="Выберите действие или введите команду..."
+            is_persistent=True
         )
-    
-    # ========== TELEGRAM КОМАНДЫ ==========
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -220,14 +95,11 @@ class UniversalTradingBot:
         
         welcome_text = (
             "🤖 *UniversalTradingBot активирован!*\n\n"
-            "📊 *Режим:* ДЕМО (тестовые данные)\n\n"
-            "📊 *Стратегия:*\n"
-            "• Тренд: H4 (цена vs EMA20)\n"
-            "• Откаты: H1 (RSI 7, CCI 14)\n"
-            "• Фильтр: ATR 50-200\n"
-            "• Паттерны: молот, поглощение\n\n"
-            "🚀 *Развернут на Render.com*\n"
-            "⏰ *Работает 24/7 (Flask keep-alive)*\n\n"
+            "🚀 *Версия:* Упрощённая (без pandas/TA-Lib)\n"
+            "📊 *Инструменты:* XAUUSD, EURUSD, GBPUSD\n"
+            "⏱ *Интервал проверки:* 5 минут\n"
+            "🌐 *Хостинг:* Render.com\n"
+            "✅ *Flask keep-alive:* Включён\n\n"
             "📱 *Используйте кнопки ниже:*"
         )
         
@@ -237,20 +109,198 @@ class UniversalTradingBot:
             parse_mode='Markdown',
             reply_markup=keyboard
         )
-        
-        # Отправляем приветственный график
-        await self.send_welcome_chart(update)
     
-    # ... (остальные команды остаются без изменений) ...
-
-    # ========== ЦИКЛ АНАЛИЗА ==========
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /status"""
+        status_text = (
+            "🤖 *Статус бота:* 🟢 АКТИВЕН\n\n"
+            f"📊 *Инструменты:* {', '.join(SYMBOLS)}\n"
+            f"⏱ *Интервал проверки:* {CHECK_INTERVAL} сек\n"
+            f"🌐 *Flask порт:* {PORT}\n"
+            f"🚀 *Хостинг:* Render.com\n"
+            f"⏰ *Последняя проверка:* {datetime.now().strftime('%H:%M:%S')}"
+        )
+        
+        keyboard = self.create_main_keyboard()
+        await update.message.reply_text(
+            status_text, 
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+    
+    async def test_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /test"""
+        keyboard = self.create_main_keyboard()
+        
+        test_signal = {
+            'symbol': 'XAUUSD',
+            'action': 'BUY',
+            'price': round(random.uniform(5050, 5100), 2),
+            'sl': round(random.uniform(5000, 5040), 2),
+            'tp': round(random.uniform(5150, 5200), 2),
+            'reason': 'Тестовый сигнал - бот работает на Render!',
+            'timestamp': datetime.now().strftime('%H:%M:%S')
+        }
+        
+        emoji = "🟢" if test_signal['action'] == 'BUY' else "🔴"
+        action_text = "ПОКУПКА" if test_signal['action'] == 'BUY' else "ПРОДАЖА"
+        
+        message = (
+            f"{emoji} *{action_text} {test_signal['symbol']}* {emoji}\n\n"
+            f"📍 *Цена входа:* {test_signal['price']:.2f}\n"
+            f"🛡 *Стоп-лосс:* {test_signal['sl']:.2f}\n"
+            f"🎯 *Тейк-профит:* {test_signal['tp']:.2f}\n"
+            f"📊 *Причина:* {test_signal['reason']}\n\n"
+            f"⏰ *Время:* {test_signal['timestamp']}\n"
+            f"🚀 *Хостинг:* Render.com\n"
+            f"🔧 *Режим:* ТЕСТ (без TA-Lib)"
+        )
+        
+        await update.message.reply_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /help"""
+        help_text = (
+            "🤖 *UniversalTradingBot на Render.com*\n\n"
+            "📋 *Доступные команды:*\n\n"
+            "🚀 /start - активация бота\n"
+            "📊 /status - статус системы\n"
+            "🎯 /test - тестовый сигнал\n"
+            "🔍 /signal - проверить все инструменты\n\n"
+            "📱 *Кнопки быстрого доступа:*\n"
+            "• 📊 Статус - информация о боте\n"
+            "• 🧪 Тест - тестовый сигнал\n"
+            "• 🚨 Сигнал - проверка всех инструментов\n"
+            "• 🟡 XAUUSD - быстрый доступ к золоту\n"
+            "• 💶 EURUSD - быстрый доступ к евро\n"
+            "• 💷 GBPUSD - быстрый доступ к фунту\n\n"
+            "🌐 *Health check:*\n"
+            "https://ваш-сервис.onrender.com/health"
+        )
+        
+        keyboard = self.create_main_keyboard()
+        await update.message.reply_text(
+            help_text, 
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+    
+    async def signal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /signal"""
+        keyboard = self.create_main_keyboard()
+        await update.message.reply_text(
+            "🔍 Проверяю инструменты...",
+            reply_markup=keyboard
+        )
+        
+        signals_found = 0
+        for symbol in SYMBOLS:
+            try:
+                # Генерация случайного сигнала для демо
+                if random.random() > 0.5:  # 50% шанс на сигнал
+                    action = random.choice(['BUY', 'SELL'])
+                    price = random.uniform(5000, 5100) if symbol == 'XAUUSD' else random.uniform(1.05, 1.15)
+                    
+                    signal = {
+                        'symbol': symbol,
+                        'action': action,
+                        'price': round(price, 2),
+                        'sl': round(price * 0.99, 2),
+                        'tp': round(price * 1.02, 2),
+                        'reason': 'Демо-сигнал от Render бота',
+                        'timestamp': datetime.now().strftime('%H:%M:%S')
+                    }
+                    
+                    emoji = "🟢" if action == 'BUY' else "🔴"
+                    action_text = "ПОКУПКА" if action == 'BUY' else "ПРОДАЖА"
+                    
+                    message = (
+                        f"{emoji} *{action_text} {symbol}* {emoji}\n"
+                        f"📍 *Цена:* {signal['price']:.2f}\n"
+                        f"📊 *Причина:* {signal['reason']}\n"
+                        f"⏰ *Время:* {signal['timestamp']}"
+                    )
+                    
+                    bot = Bot(token=self.token)
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=message,
+                        parse_mode='Markdown'
+                    )
+                    
+                    signals_found += 1
+                    await asyncio.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка проверки {symbol}: {e}")
+        
+        if signals_found > 0:
+            await update.message.reply_text(
+                f"✅ Найдено {signals_found} демо-сигналов",
+                reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_text(
+                "📊 Сигналы не найдены в этой проверке",
+                reply_markup=keyboard
+            )
+    
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатий на кнопки"""
+        text = update.message.text
+        
+        if text == "📊 Статус":
+            await self.status_command(update, context)
+        elif text == "🧪 Тест":
+            await self.test_command(update, context)
+        elif text == "🚨 Сигнал":
+            await self.signal_command(update, context)
+        elif text == "🟡 XAUUSD":
+            await update.message.reply_text(
+                "🟡 XAUUSD (золото)\n"
+                "💎 Демо-цена: 5075.50\n"
+                "📊 Статус: НЕТ СИГНАЛА\n"
+                "⏰ Следующая проверка: через 5 мин",
+                reply_markup=self.create_main_keyboard()
+            )
+        elif text == "💶 EURUSD":
+            await update.message.reply_text(
+                "💶 EURUSD (евро/доллар)\n"
+                "💎 Демо-цена: 1.09550\n"
+                "📊 Статус: НЕТ СИГНАЛА\n"
+                "⏰ Следующая проверка: через 5 мин",
+                reply_markup=self.create_main_keyboard()
+            )
+        elif text == "💷 GBPUSD":
+            await update.message.reply_text(
+                "💷 GBPUSD (фунт/доллар)\n"
+                "💎 Демо-цена: 1.28050\n"
+                "📊 Статус: НЕТ СИГНАЛА\n"
+                "⏰ Следующая проверка: через 5 мин",
+                reply_markup=self.create_main_keyboard()
+            )
+        elif text == "ℹ️ Помощь":
+            await self.help_command(update, context)
+        elif text == "🔄 Обновить":
+            keyboard = self.create_main_keyboard()
+            await update.message.reply_text(
+                "✅ Интерфейс обновлен!",
+                reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_text(
+                "🤔 Используйте кнопки меню или команды",
+                reply_markup=self.create_main_keyboard()
+            )
     
     def analysis_loop(self):
-        """Основной цикл анализа"""
+        """Цикл анализа (упрощённый)"""
         self.running = True
-        logger.info("🚀 Цикл анализа запущен на Render")
-        
-        self.last_signals = {}
+        logger.info("🚀 Цикл анализа запущен")
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -260,47 +310,45 @@ class UniversalTradingBot:
         while self.running:
             try:
                 check_counter += 1
-                current_time = datetime.now().strftime('%H:%M:%S')
-                
-                # Логируем каждые 10 проверок, чтобы не засорять логи
                 if check_counter % 10 == 0:
-                    logger.info(f"🔍 Проверка #{check_counter} ({current_time})")
+                    logger.info(f"🔍 Проверка #{check_counter}")
                 
-                signals_found = 0
-                for symbol in SYMBOLS:
-                    signal = self.analyze_strategy(symbol)
-                    if signal and self.chat_id:
-                        signal_key = f"{symbol}_{signal['action']}"
-                        current_timestamp = time.time()
-                        
-                        if signal_key in self.last_signals:
-                            time_diff = current_timestamp - self.last_signals[signal_key]
-                            if time_diff < 600:
-                                continue
-                        
-                        self.last_signals[signal_key] = current_timestamp
-                        
-                        data = self.get_market_data(symbol, '1h', 50)
-                        
-                        success = loop.run_until_complete(
-                            self.send_signal_with_chart(signal, data)
+                if self.chat_id and random.random() > 0.8:  # 20% шанс на сигнал
+                    symbol = random.choice(SYMBOLS)
+                    action = random.choice(['BUY', 'SELL'])
+                    
+                    signal = {
+                        'symbol': symbol,
+                        'action': action,
+                        'price': round(random.uniform(5000, 5100), 2) if symbol == 'XAUUSD' else round(random.uniform(1.05, 1.15), 5),
+                        'reason': 'Автоматический демо-сигнал',
+                        'timestamp': datetime.now().strftime('%H:%M:%S')
+                    }
+                    
+                    emoji = "🟢" if action == 'BUY' else "🔴"
+                    action_text = "ПОКУПКА" if action == 'BUY' else "ПРОДАЖА"
+                    
+                    message = (
+                        f"{emoji} *{action_text} {signal['symbol']}* {emoji}\n\n"
+                        f"📍 *Цена входа:* {signal['price']:.2f}\n"
+                        f"📊 *Причина:* {signal['reason']}\n\n"
+                        f"⏰ *Время:* {signal['timestamp']}\n"
+                        f"🚀 *Хостинг:* Render.com\n"
+                        f"🔧 *Режим:* АВТО-ДЕМО"
+                    )
+                    
+                    bot = Bot(token=self.token)
+                    loop.run_until_complete(
+                        bot.send_message(
+                            chat_id=self.chat_id,
+                            text=message,
+                            parse_mode='Markdown'
                         )
-                        
-                        if success:
-                            signals_found += 1
-                            time.sleep(2)
+                    )
+                    
+                    logger.info(f"🎯 Отправлен автоматический сигнал: {symbol} {action}")
                 
-                if signals_found == 0:
-                    if not self.chat_id:
-                        if check_counter % 20 == 0:  # Реже логируем
-                            logger.info("📊 Ожидание активации бота (напишите /start в Telegram)")
-                    else:
-                        # Не логируем каждую проверку без сигналов
-                        pass
-                else:
-                    logger.info(f"🎯 Отправлено {signals_found} сигналов")
-                
-                # Спим без логирования, чтобы не засорять логи
+                # Спим до следующей проверки
                 sleep_counter = 0
                 while sleep_counter < CHECK_INTERVAL and self.running:
                     time.sleep(1)
@@ -327,71 +375,49 @@ class UniversalTradingBot:
             self.application.add_handler(CommandHandler("status", self.status_command))
             self.application.add_handler(CommandHandler("test", self.test_command))
             self.application.add_handler(CommandHandler("signal", self.signal_command))
-            self.application.add_handler(CommandHandler("chart", self.chart_command))
             
-            # Регистрируем обработчик кнопок клавиатуры
+            # Регистрируем обработчик кнопок
             self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.button_handler))
             
-            logger.info("📱 Telegram polling запущен на Render")
+            logger.info("📱 Telegram polling запущен")
             self.application.run_polling(
                 allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-                close_loop=False  # Не закрываем loop, чтобы можно было перезапустить
+                drop_pending_updates=True
             )
             
         except Exception as e:
             logger.error(f"❌ Ошибка Telegram: {e}")
-            # Пытаемся переподключиться через 30 секунд
-            time.sleep(30)
-            self.telegram_polling_loop()
         finally:
             loop.close()
             logger.info("🛑 Telegram polling остановлен")
     
     def run(self):
-        """Запуск бота на Render"""
-        global bot_instance
-        bot_instance = self
-        
+        """Запуск бота"""
         logger.info("🚀 Запуск UniversalTradingBot на Render.com...")
         
-        print("\n" + "="*70)
+        print("\n" + "="*60)
         print("🤖 UNIVERSAL TRADING BOT (RENDER.COM)")
-        print("="*70)
-        print(f"📊 Режим данных: ДЕМО 📊")
+        print("="*60)
+        print(f"📊 Режим: УПРОЩЁННЫЙ (без pandas/TA-Lib)")
         print(f"📈 Инструменты: {', '.join(SYMBOLS)}")
-        print(f"⏱ Интервал проверки: {CHECK_INTERVAL} сек")
-        print(f"🌐 Flask порт: {flask_port}")
-        print(f"🎯 Стратегия: H4 тренд + H1 откаты")
-        print(f"📊 Графики: ВКЛЮЧЕНЫ")
-        print(f"📱 Клавиатура: ПОСТОЯННАЯ ВНИЗУ")
+        print(f"⏱ Интервал: {CHECK_INTERVAL} сек")
+        print(f"🌐 Flask порт: {PORT}")
         print(f"🚀 Хостинг: Render.com")
-        print(f"⏰ Режим: 24/7 с Flask keep-alive")
-        print("="*70)
+        print("="*60)
         print("📱 ИНСТРУКЦИЯ:")
-        print("  1. Откройте Telegram")
-        print("  2. Найдите бота")
-        print("  3. Напишите /start (ОБЯЗАТЕЛЬНО!)")
-        print("  4. Используйте ПОСТОЯННЫЕ кнопки внизу для быстрого доступа!")
-        print("="*70)
-        print("🌐 Health check: https://your-service.onrender.com/health")
-        print("🛑 Сервис автоматически перезапускается на Render")
-        print("="*70 + "\n")
+        print("  1. Напишите боту /start")
+        print("  2. Используйте кнопки внизу")
+        print("  3. Авто-сигналы каждые 5 минут")
+        print("="*60 + "\n")
         
-        # Запускаем планировщик для самопинга
-        start_scheduler()
-        
-        # Запускаем Flask сервер в отдельном потоке
+        # Запускаем Flask сервер
         flask_thread = threading.Thread(
             target=start_flask,
             daemon=True,
             name="FlaskThread"
         )
         flask_thread.start()
-        logger.info("✅ Flask сервер запущен для health checks")
-        
-        # Ждем немного для запуска Flask
-        time.sleep(2)
+        logger.info(f"🌐 Flask сервер запущен на порту {PORT}")
         
         # Запускаем Telegram бота
         tg_thread = threading.Thread(
@@ -401,7 +427,7 @@ class UniversalTradingBot:
         )
         tg_thread.start()
         
-        time.sleep(3)
+        time.sleep(2)
         
         # Запускаем анализ
         analysis_thread = threading.Thread(
@@ -411,32 +437,15 @@ class UniversalTradingBot:
         )
         analysis_thread.start()
         
-        logger.info("✅ Бот успешно запущен на Render!")
-        logger.info(f"🌐 Health check доступен по порту {flask_port}")
-        logger.info("⏰ Самопинг каждые 5 минут для поддержания активности")
+        logger.info("✅ Бот успешно запущен!")
         
-        # Бесконечный цикл для поддержания работы
+        # Бесконечный цикл
         try:
             while True:
-                time.sleep(10)
-                # Периодически проверяем состояние потоков
-                if not flask_thread.is_alive():
-                    logger.warning("⚠️ Flask thread остановлен, пытаемся перезапустить...")
-                    flask_thread = threading.Thread(
-                        target=start_flask,
-                        daemon=True,
-                        name="FlaskThread"
-                    )
-                    flask_thread.start()
-                    time.sleep(2)
-                    
+                time.sleep(1)
         except KeyboardInterrupt:
             self.running = False
-            scheduler.shutdown()
-            print("\n" + "="*60)
-            print("👋 Бот остановлен")
-            print("="*60 + "\n")
-            time.sleep(2)
+            print("\n👋 Бот остановлен\n")
             sys.exit(0)
 
 if __name__ == "__main__":
